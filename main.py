@@ -33,7 +33,7 @@ from models import (
 APP_TITLE = "License Tracker"
 APP_WIDTH = 1400
 APP_HEIGHT = 800
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.1.8"
 GITHUB_REPO = "altius2030/licenseTracket"
 GITHUB_RELEASES_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 DB_PATH = os.path.join(get_app_dir(), "licenses.db")
@@ -2294,10 +2294,33 @@ class LicenseTrackerApp(ctk.CTk):
                 pass
             os._exit(0)
 
+    def _on_ctrl_c(self, event=None):
+        """Ctrl+C: copy selected rows (table) or selected text (entries)."""
+        try:
+            widget = self.focus_get()
+        except Exception:
+            widget = None
+        tree = getattr(self, "tree", None)
+        if tree is not None and widget is tree and tree.selection():
+            self._on_copy_card_data()
+            return "break"
+        # Entries / text widgets: copy the current selection explicitly
+        if isinstance(widget, (tk.Entry, tk.Text, tk.Spinbox)):
+            try:
+                sel = widget.selection_get()
+            except Exception:
+                sel = ""
+            if sel:
+                copy_to_clipboard(self, sel)
+                return "break"
+        return None
+
     def _bind_shortcuts(self):
         """Global keyboard shortcuts."""
         self.bind("<Control-f>", lambda e: self.search_entry.focus_set())
         self.bind("<F5>", lambda e: self._refresh_data())
+        self.bind("<Control-c>", self._on_ctrl_c, add="+")
+        self.bind("<Control-C>", self._on_ctrl_c, add="+")
         self.bind("<Control-n>", lambda e: self._on_add())
         self.bind("<Insert>", lambda e: self._on_add())
     
