@@ -33,7 +33,7 @@ from models import (
 APP_TITLE = "License Tracker"
 APP_WIDTH = 1400
 APP_HEIGHT = 800
-APP_VERSION = "1.1.9"
+APP_VERSION = "1.1.10"
 GITHUB_REPO = "altius2030/licenseTracket"
 GITHUB_RELEASES_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 DB_PATH = os.path.join(get_app_dir(), "licenses.db")
@@ -562,6 +562,9 @@ class LicenseCardDialog(ctk.CTkToplevel):
 
         # Shortcut: Ctrl+Shift+C copies the card data
         self.bind("<Control-Shift-C>", lambda e: self._on_copy_card())
+        # Ctrl+C: copy selected text in a field, otherwise the whole card
+        self.bind("<Control-c>", self._on_ctrl_c_card)
+        self.bind("<Control-C>", self._on_ctrl_c_card)
     
     def _center_window(self):
         self.update_idletasks()
@@ -1089,6 +1092,25 @@ class LicenseCardDialog(ctk.CTkToplevel):
         
         return data
     
+    def _on_ctrl_c_card(self, event=None):
+        """Ctrl+C in the card: copy selected field text, else the whole card."""
+        for entry in getattr(self, "entries", {}).values():
+            inner = getattr(entry, "_entry", None)
+            if inner is None:
+                inner = getattr(entry, "_textbox", None)
+            if inner is None:
+                continue
+            try:
+                sel = inner.selection_get()
+            except Exception:
+                sel = ""
+            if sel:
+                copy_to_clipboard(self, sel)
+                return "break"
+        # No selection in any field -> copy the whole card data
+        self._on_copy_card()
+        return "break"
+
     def _on_copy_card(self):
         """Copy name / email / store / phone / license ID to the clipboard."""
         text = format_card_copy_text(self._collect_data())
