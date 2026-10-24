@@ -33,7 +33,7 @@ from models import (
 APP_TITLE = "License Tracker"
 APP_WIDTH = 1400
 APP_HEIGHT = 800
-APP_VERSION = "1.1.8"
+APP_VERSION = "1.1.9"
 GITHUB_REPO = "altius2030/licenseTracket"
 GITHUB_RELEASES_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 DB_PATH = os.path.join(get_app_dir(), "licenses.db")
@@ -705,7 +705,51 @@ class LicenseCardDialog(ctk.CTkToplevel):
             entry.pack(side="left", fill="x", expand=True)
         
         self.entries[field_name] = entry
-    
+        self._attach_field_copy_menu(entry)
+
+    def _attach_field_copy_menu(self, entry):
+        """Right-click context menu with 'Копировать' for any card input."""
+
+        def on_right_click(event):
+            menu = tk.Menu(self, tearoff=0, font=("Segoe UI", 10))
+
+            def do_copy():
+                text = ""
+                if isinstance(entry, ctk.CTkTextbox):
+                    try:
+                        text = entry._textbox.selection_get()
+                    except Exception:
+                        text = entry.get("1.0", "end-1c")
+                else:
+                    try:
+                        text = entry._entry.selection_get()
+                    except Exception:
+                        text = entry.get()
+                if not text:
+                    try:
+                        text = entry.get() if not isinstance(entry, ctk.CTkTextbox) else entry.get("1.0", "end-1c")
+                    except Exception:
+                        text = ""
+                copy_to_clipboard(self, text)
+
+            menu.add_command(label="📋  Копировать", command=do_copy)
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return "break"
+
+        targets = [entry]
+        for attr in ("_entry", "_textbox"):
+            inner = getattr(entry, attr, None)
+            if inner is not None:
+                targets.append(inner)
+        for t in targets:
+            try:
+                t.bind("<Button-3>", on_right_click, add="+")
+            except Exception:
+                pass
+
     def _create_status_section(self):
         frame = ctk.CTkFrame(self.scroll_frame, fg_color=BG_PANEL, corner_radius=12)
         frame.pack(fill="x", pady=(18, 5))
@@ -762,6 +806,7 @@ class LicenseCardDialog(ctk.CTkToplevel):
             fg_color=BG_PANEL_2, border_color=BORDER, border_width=1
         )
         self.new_comment_box.pack(side="left", fill="x", expand=True)
+        self._attach_field_copy_menu(self.new_comment_box)
 
         ctk.CTkButton(
             input_row, text="＋ Добавить", width=110,
