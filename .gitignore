@@ -1,0 +1,21 @@
+# Build artifacts
+build/
+dist/
+installer/
+*.spec
+
+# Database (user data)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Temp
+*.log
