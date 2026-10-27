@@ -3,7 +3,7 @@
 ; so the app must live in a writable folder (LocalAppData).
 
 #define AppName "License Tracker"
-#define AppVersion "1.1.15"
+#define AppVersion "1.1.16"
 #define AppExe "LicenseTracker.exe"
 #define AppPublisher "License Tracker"
 

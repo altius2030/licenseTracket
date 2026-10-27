@@ -36,7 +36,7 @@ from models import (
 APP_TITLE = "License Tracker"
 APP_WIDTH = 1400
 APP_HEIGHT = 800
-APP_VERSION = "1.1.16"
+APP_VERSION = "1.1.17"
 GITHUB_REPO = "altius2030/licenseTracket"
 GITHUB_RELEASES_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 DB_PATH = os.path.join(get_app_dir(), "licenses.db")
@@ -1909,6 +1909,8 @@ class LicenseTrackerApp(ctk.CTk):
         self._refresh_data()
         self._update_stats()
         self._bind_shortcuts()
+        # Auto-backup to Documents on startup
+        self.after(1500, self._auto_backup_to_documents)
         # Background update check on launch (only for frozen builds)
         self.after(2500, self._auto_update_check)
     
@@ -1932,6 +1934,14 @@ class LicenseTrackerApp(ctk.CTk):
             fg_color="transparent", hover_color=BG_PANEL_2,
             text_color=TEXT_MUTED, font=ctk.CTkFont(size=12),
             command=self._show_file_menu
+        ).pack(side="left", padx=0, pady=14)
+
+        # Columns visibility button
+        ctk.CTkButton(
+            nav, text="📊  Столбцы", width=100, height=36, corner_radius=8,
+            fg_color="transparent", hover_color=BG_PANEL_2,
+            text_color=TEXT_MUTED, font=ctk.CTkFont(size=12),
+            command=self._show_columns_dialog
         ).pack(side="left", padx=0, pady=14)
 
         # Category nav items (centered)
@@ -2061,16 +2071,25 @@ class LicenseTrackerApp(ctk.CTk):
             ("days_left", "Осталось", 95),
             ("status", "Статус", 125),
         ]
-        
+
+        # Load column visibility settings (default: all visible)
+        self._column_visibility = {}
+        for col_id, _label, _width in self.columns:
+            val = self.db.get_setting(f"column_visible_{col_id}", "1")
+            self._column_visibility[col_id] = val == "1"
+
         col_ids = [c[0] for c in self.columns]
         self.tree = ttk.Treeview(
             tree_frame, columns=col_ids, show="headings",
             selectmode="extended", style="Modern.Treeview"
         )
-        
+
         for col_id, col_name, col_width in self.columns:
             self.tree.heading(col_id, text=col_name, command=lambda c=col_id: self._on_column_sort(c))
-            self.tree.column(col_id, width=col_width, minwidth=55, anchor="w")
+            if self._column_visibility.get(col_id, True):
+                self.tree.column(col_id, width=col_width, minwidth=55, anchor="w")
+            else:
+                self.tree.column(col_id, width=0, minwidth=0, stretch=False)
         
         # Scrollbars
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
@@ -2308,6 +2327,79 @@ class LicenseTrackerApp(ctk.CTk):
             except Exception:
                 pass
 
+    def _show_columns_dialog(self):
+        """Show a dialog with checkboxes to toggle column visibility."""
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Настройка столбцов")
+        dlg.geometry("340x420")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.configure(fg_color=BG_PANEL)
+        dlg.after(100, dlg.grab_set)
+
+        ctk.CTkLabel(
+            dlg, text="📊  Отображаемые столбцы",
+            font=ctk.CTkFont(size=15, weight="bold"), text_color=TEXT_MAIN,
+        ).pack(pady=(20, 12))
+
+        # Scrollable frame for checkboxes
+        scroll = ctk.CTkScrollableFrame(dlg, fg_color="transparent", width=300, height=300)
+        scroll.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+
+        # Checkbox variables
+        self._col_vars = {}
+        for col_id, col_name, _col_width in self.columns:
+            var = ctk.StringVar(value="1" if self._column_visibility.get(col_id, True) else "0")
+            self._col_vars[col_id] = var
+            cb = ctk.CTkCheckBox(
+                scroll, text=col_name, variable=var, onvalue="1", offvalue="0",
+                font=ctk.CTkFont(size=13), text_color=TEXT_MAIN,
+                fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            )
+            cb.pack(anchor="w", pady=4, padx=4)
+
+        def apply():
+            # Save settings and rebuild the UI
+            for col_id, var in self._col_vars.items():
+                self.db.set_setting(f"column_visible_{col_id}", var.get())
+            dlg.destroy()
+            # Rebuild the table with new visibility
+            self._rebuild_table()
+
+        buttons = ctk.CTkFrame(dlg, fg_color="transparent")
+        buttons.pack(fill="x", padx=20, pady=(0, 16))
+        ctk.CTkButton(
+            buttons, text="Применить", width=120, height=36, corner_radius=8,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            font=ctk.CTkFont(size=13, weight="bold"), command=apply
+        ).pack(side="left", expand=True, fill="x", padx=(0, 6))
+        ctk.CTkButton(
+            buttons, text="Отмена", width=120, height=36, corner_radius=8,
+            fg_color=BG_PANEL_2, hover_color=BORDER, text_color=TEXT_MAIN,
+            font=ctk.CTkFont(size=13), command=dlg.destroy
+        ).pack(side="right", expand=True, fill="x", padx=(6, 0))
+
+    def _rebuild_table(self):
+        """Rebuild the table to reflect column visibility changes."""
+        # Save current state
+        items = self.tree.get_children()
+        item_values = {item: self.tree.item(item) for item in items}
+        current_selection = self.tree.selection()
+        current_scroll = self.tree.yview()
+
+        # Re-read column visibility
+        self._column_visibility = {}
+        for col_id, _label, _width in self.columns:
+            val = self.db.get_setting(f"column_visible_{col_id}", "1")
+            self._column_visibility[col_id] = val == "1"
+
+        # Reconfigure columns
+        for col_id, col_name, col_width in self.columns:
+            if self._column_visibility.get(col_id, True):
+                self.tree.column(col_id, width=col_width, minwidth=55, anchor="w")
+            else:
+                self.tree.column(col_id, width=0, minwidth=0, stretch=False)
+
     def _backup_database(self):
         """Save a copy of the database to a user-chosen location."""
         initial = f"licenses_backup_{date.today().isoformat()}.db"
@@ -2473,6 +2565,38 @@ class LicenseTrackerApp(ctk.CTk):
                     os.remove(os.path.join(folder, old))
                 except Exception:
                     pass
+        except Exception:
+            pass
+
+    def _auto_backup_to_documents(self):
+        """Automatically back up the database to Documents/LicenseTracker_Backups once per day."""
+        try:
+            last = self.db.get_setting("auto_backup_date", "")
+            today = date.today().isoformat()
+            if last == today:
+                return  # already backed up today
+
+            docs = os.path.join(os.path.expanduser("~"), "Documents")
+            folder = os.path.join(docs, "LicenseTracker_Backups")
+            os.makedirs(folder, exist_ok=True)
+
+            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            dest = os.path.join(folder, f"licenses_backup_{ts}.db")
+            import shutil
+            shutil.copy2(self.db.db_path, dest)
+
+            # Keep only the last 14 daily backups
+            backups = sorted(
+                f for f in os.listdir(folder)
+                if f.startswith("licenses_backup_") and f.endswith(".db")
+            )
+            for old in backups[:-14]:
+                try:
+                    os.remove(os.path.join(folder, old))
+                except Exception:
+                    pass
+
+            self.db.set_setting("auto_backup_date", today)
         except Exception:
             pass
 
