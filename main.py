@@ -36,7 +36,7 @@ from models import (
 APP_TITLE = "License Tracker"
 APP_WIDTH = 1400
 APP_HEIGHT = 800
-APP_VERSION = "1.1.15"
+APP_VERSION = "1.1.16"
 GITHUB_REPO = "altius2030/licenseTracket"
 GITHUB_RELEASES_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 DB_PATH = os.path.join(get_app_dir(), "licenses.db")
@@ -682,9 +682,9 @@ class LicenseCardDialog(ctk.CTkToplevel):
 
         # Copy button for the field
         copy_btn = ctk.CTkButton(
-            frame, text="📋", width=30, height=30, corner_radius=6,
-            fg_color=BG_PANEL_2, hover_color=BORDER, text_color=TEXT_MUTED,
-            font=ctk.CTkFont(size=13),
+            frame, text="📋", width=32, height=32, corner_radius=6,
+            fg_color=BG_PANEL_2, hover_color=ACCENT, text_color=TEXT_MAIN,
+            font=ctk.CTkFont(size=14),
             command=lambda fn=field_name: self._copy_field_value(fn)
         )
         copy_btn.pack(side="left", padx=(0, 4))
@@ -1865,93 +1865,8 @@ class ImportDialog(ctk.CTkToplevel):
         messagebox.showinfo("Шаблон", f"Шаблон сохранён:\n{path}", parent=self)
 
 
-# ===== Windows low-level keyboard hook for layout-independent Ctrl+C =====
-_HOOK_THREAD = None
-_HOOK_HANDLE = None
-_APP_HWND = None
-_CTRL_C_QUEUE = queue.Queue()
-_C_WAS_PRESSED = False
-
-
-class _KBDLLHOOKSTRUCT(ctypes.Structure):
-    _fields_ = [
-        ("vkCode", ctypes.c_uint),
-        ("scanCode", ctypes.c_uint),
-        ("flags", ctypes.c_uint),
-        ("time", ctypes.c_uint),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-    ]
-
-
-def _low_level_keyboard_proc(nCode, wParam, lParam):
-    global _C_WAS_PRESSED
-    try:
-        if nCode >= 0 and wParam in (0x0100, 0x0104):  # WM_KEYDOWN / WM_SYSKEYDOWN
-            kb = ctypes.cast(lParam, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
-            if kb.vkCode == 0x43:  # VK_C
-                ctrl_held = bool(ctypes.windll.user32.GetAsyncKeyState(0x11) & 0x8000)
-                if ctrl_held and not _C_WAS_PRESSED:
-                    _C_WAS_PRESSED = True
-                    try:
-                        fg = ctypes.windll.user32.GetForegroundWindow()
-                    except Exception:
-                        fg = None
-                    if _APP_HWND is not None and fg == _APP_HWND:
-                        try:
-                            _CTRL_C_QUEUE.put_nowait("copy")
-                        except Exception:
-                            pass
-            elif kb.vkCode == 0x43:
-                pass
-        # Reset pressed flag on key up
-        if nCode >= 0 and wParam in (0x0101, 0x0105):  # WM_KEYUP / WM_SYSKEYUP
-            kb = ctypes.cast(lParam, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
-            if kb.vkCode == 0x43:
-                _C_WAS_PRESSED = False
-    except Exception:
-        pass
-    return ctypes.windll.user32.CallNextHookEx(_HOOK_HANDLE, nCode, wParam, lParam)
-
-
-def _hook_thread_func():
-    global _HOOK_HANDLE
-    try:
-        proc = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p)(_low_level_keyboard_proc)
-        _hook_thread_func._proc = proc  # keep reference
-        _HOOK_HANDLE = ctypes.windll.user32.SetWindowsHookExW(13, proc, 0, 0)
-        if not _HOOK_HANDLE:
-            return
-        msg = ctypes.wintypes.MSG()
-        while ctypes.windll.user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
-            ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
-        ctypes.windll.user32.UnhookWindowsHookEx(_HOOK_HANDLE)
-    except Exception:
-        pass
-
-
-def install_keyboard_hook():
-    global _HOOK_THREAD
-    if _HOOK_THREAD is not None and _HOOK_THREAD.is_alive():
-        return
-    _HOOK_THREAD = threading.Thread(target=_hook_thread_func, daemon=True)
-    _HOOK_THREAD.start()
-
-
-def uninstall_keyboard_hook():
-    global _HOOK_THREAD, _HOOK_HANDLE
-    try:
-        if _HOOK_HANDLE:
-            ctypes.windll.user32.PostThreadMessageW(_HOOK_THREAD.ident, 0x0012, 0, 0)  # WM_QUIT
-    except Exception:
-        pass
-    _HOOK_THREAD = None
-    _HOOK_HANDLE = None
-
-
-def set_app_hwnd(hwnd):
-    global _APP_HWND
-    _APP_HWND = hwnd
+# (Low-level keyboard hook removed — it blocked Ctrl+C globally and triggered AV).
+# Ctrl+C on Russian layout is handled by _on_key_press below using keycode (physical key).
 
 
 class LicenseTrackerApp(ctk.CTk):
@@ -1994,7 +1909,6 @@ class LicenseTrackerApp(ctk.CTk):
         self._refresh_data()
         self._update_stats()
         self._bind_shortcuts()
-        self.after(200, self._poll_ctrl_c)
         # Background update check on launch (only for frozen builds)
         self.after(2500, self._auto_update_check)
     
@@ -2188,6 +2102,8 @@ class LicenseTrackerApp(ctk.CTk):
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Button-3>", self._on_right_click)
         self.tree.bind("<Delete>", lambda e: self._on_delete_selected())
+        # Layout-independent Ctrl+C: check physical key (keycode 67 = C) with Control held
+        self.tree.bind("<Control-KeyPress>", self._on_tree_ctrl_key)
         self.tree.bind("<KeyPress>", self._on_key_press, add="+")
         self.tree.bind("<<Copy>>", self._on_ctrl_c, add="+")
         self.tree.bind("<Control-Cyrillic_es>", self._on_ctrl_c, add="+")
@@ -2793,51 +2709,29 @@ class LicenseTrackerApp(ctk.CTk):
         return None
 
     def _on_key_press(self, event):
-        """Layout-independent Ctrl+C (works on Russian keyboard too)."""
+        """Layout-independent Ctrl+C (works on Russian keyboard too).
+        Uses keycode (physical key 67 = C) — ignores keysym which varies by layout."""
         try:
             ks = str(getattr(event, "keysym", "") or "")
             kc = getattr(event, "keycode", None)
             st = getattr(event, "state", 0) or 0
-            # Debug log
-            try:
-                import os as _os, tempfile as _tf
-                log = _os.path.join(_tf.gettempdir(), "lt_keys.txt")
-                with open(log, "a", encoding="utf-8") as _f:
-                    _f.write(f"keycode={kc} keysym={ks!r} state={st} (ctrl={bool(st & 0x4)})\n")
-            except Exception:
-                pass
-            if st & 0x4:  # Control held
-                low = ks.lower()
-                c_keysyms = ("c", "u0441", "cyrillic_es", "cyrillic c", "с")
-                if kc == 67 or low in c_keysyms or "es" in low or low.endswith("c") or low.endswith("с"):
-                    return self._on_ctrl_c(event)
-                # Fallback: table has selection and key is not another shortcut
-                tree = getattr(self, "tree", None)
-                if tree is not None and tree.selection():
-                    other = {"f", "a", "v", "x", "z", "s", "n", "insert", "delete",
-                             "left", "right", "up", "down", "home", "end", "prior",
-                             "next", "return", "tab", "escape", "backspace", "f5"}
-                    if low not in other:
-                        return self._on_ctrl_c(event)
+            if st & 0x4 and kc == 67:  # Ctrl + physical C key
+                return self._on_ctrl_c(event)
         except Exception:
             pass
         return None
 
+    def _on_tree_ctrl_key(self, event):
+        """Tree focused + Ctrl+key: copy if it's the C key (any layout)."""
+        if getattr(event, "keycode", None) == 67:
+            if self.tree.selection():
+                self._on_copy_card_data()
+                return "break"
+        return None
+
     def _poll_ctrl_c(self):
-        try:
-            while True:
-                _CTRL_C_QUEUE.get_nowait()
-                # Trigger copy if table has selection
-                tree = getattr(self, "tree", None)
-                if tree is not None and tree.selection():
-                    self._on_ctrl_c()
-        except Exception:
-            pass
-        try:
-            if self.winfo_exists():
-                self.after(100, self._poll_ctrl_c)
-        except Exception:
-            pass
+        """No-op: hook removed. Kept for compatibility."""
+        pass
 
     def _bind_shortcuts(self):
         """Global keyboard shortcuts."""
