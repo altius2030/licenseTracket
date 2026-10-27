@@ -33,7 +33,7 @@ from models import (
 APP_TITLE = "License Tracker"
 APP_WIDTH = 1400
 APP_HEIGHT = 800
-APP_VERSION = "1.1.10"
+APP_VERSION = "1.1.11"
 GITHUB_REPO = "altius2030/licenseTracket"
 GITHUB_RELEASES_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 DB_PATH = os.path.join(get_app_dir(), "licenses.db")
@@ -565,6 +565,7 @@ class LicenseCardDialog(ctk.CTkToplevel):
         # Ctrl+C: copy selected text in a field, otherwise the whole card
         self.bind("<Control-c>", self._on_ctrl_c_card)
         self.bind("<Control-C>", self._on_ctrl_c_card)
+        self.bind("<KeyPress>", self._on_key_press_card, add="+")
     
     def _center_window(self):
         self.update_idletasks()
@@ -1092,6 +1093,15 @@ class LicenseCardDialog(ctk.CTkToplevel):
         
         return data
     
+    def _on_key_press_card(self, event):
+        """Layout-independent Ctrl+C (works on Russian keyboard too)."""
+        try:
+            if getattr(event, "keycode", None) == 67 and (getattr(event, "state", 0) & 0x4):
+                return self._on_ctrl_c_card(event)
+        except Exception:
+            pass
+        return None
+
     def _on_ctrl_c_card(self, event=None):
         """Ctrl+C in the card: copy selected field text, else the whole card."""
         for entry in getattr(self, "entries", {}).values():
@@ -2382,12 +2392,32 @@ class LicenseTrackerApp(ctk.CTk):
                 return "break"
         return None
 
+    def _on_key_press(self, event):
+        """Layout-independent Ctrl+C (works on Russian keyboard too)."""
+        try:
+            if getattr(event, "keycode", None) == 67 and (getattr(event, "state", 0) & 0x4):
+                return self._on_ctrl_c(event)
+        except Exception:
+            pass
+        return None
+
+    def _on_key_press(self, event):
+        """Layout-independent Ctrl+C (works on Russian keyboard too)."""
+        try:
+            if getattr(event, "keycode", None) == 67 and (getattr(event, "state", 0) & 0x4):
+                return self._on_ctrl_c(event)
+        except Exception:
+            pass
+        return None
+
     def _bind_shortcuts(self):
         """Global keyboard shortcuts."""
         self.bind("<Control-f>", lambda e: self.search_entry.focus_set())
         self.bind("<F5>", lambda e: self._refresh_data())
         self.bind("<Control-c>", self._on_ctrl_c, add="+")
         self.bind("<Control-C>", self._on_ctrl_c, add="+")
+        self.bind("<KeyPress>", self._on_key_press, add="+")
+        self.bind("<KeyPress>", self._on_key_press, add="+")
         self.bind("<Control-n>", lambda e: self._on_add())
         self.bind("<Insert>", lambda e: self._on_add())
     
