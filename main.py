@@ -33,7 +33,7 @@ from models import (
 APP_TITLE = "License Tracker"
 APP_WIDTH = 1400
 APP_HEIGHT = 800
-APP_VERSION = "1.1.11"
+APP_VERSION = "1.1.12"
 GITHUB_REPO = "altius2030/licenseTracket"
 GITHUB_RELEASES_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 DB_PATH = os.path.join(get_app_dir(), "licenses.db")
@@ -566,6 +566,9 @@ class LicenseCardDialog(ctk.CTkToplevel):
         self.bind("<Control-c>", self._on_ctrl_c_card)
         self.bind("<Control-C>", self._on_ctrl_c_card)
         self.bind("<KeyPress>", self._on_key_press_card, add="+")
+        self.bind("<Control-Cyrillic_es>", self._on_ctrl_c_card)
+        self.bind("<Control-Cyrillic_ES>", self._on_ctrl_c_card)
+        self.bind("<<Copy>>", self._on_ctrl_c_card)
     
     def _center_window(self):
         self.update_idletasks()
@@ -2417,6 +2420,9 @@ class LicenseTrackerApp(ctk.CTk):
         self.bind("<Control-c>", self._on_ctrl_c, add="+")
         self.bind("<Control-C>", self._on_ctrl_c, add="+")
         self.bind("<KeyPress>", self._on_key_press, add="+")
+        self.bind("<Control-Cyrillic_es>", self._on_ctrl_c, add="+")
+        self.bind("<Control-Cyrillic_ES>", self._on_ctrl_c, add="+")
+        self.bind("<<Copy>>", self._on_ctrl_c, add="+")
         self.bind("<KeyPress>", self._on_key_press, add="+")
         self.bind("<Control-n>", lambda e: self._on_add())
         self.bind("<Insert>", lambda e: self._on_add())
