@@ -36,7 +36,7 @@ from models import (
 APP_TITLE = "License Tracker"
 APP_WIDTH = 1400
 APP_HEIGHT = 800
-APP_VERSION = "1.1.12"
+APP_VERSION = "1.1.14"
 GITHUB_REPO = "altius2030/licenseTracket"
 GITHUB_RELEASES_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 DB_PATH = os.path.join(get_app_dir(), "licenses.db")
@@ -627,6 +627,7 @@ class LicenseCardDialog(ctk.CTkToplevel):
         }
         
         # Fields
+        self._field_copy_buttons = {}
         for field_name, label, field_type in self.fields:
             if field_name in SECTION_MARKERS:
                 ctk.CTkLabel(
@@ -678,9 +679,19 @@ class LicenseCardDialog(ctk.CTkToplevel):
     def _create_field(self, field_name: str, label: str, field_type: str):
         frame = ctk.CTkFrame(self.scroll_frame, fg_color="transparent")
         frame.pack(fill="x", pady=3)
-        
+
+        # Copy button for the field
+        copy_btn = ctk.CTkButton(
+            frame, text="📋", width=30, height=30, corner_radius=6,
+            fg_color=BG_PANEL_2, hover_color=BORDER, text_color=TEXT_MUTED,
+            font=ctk.CTkFont(size=13),
+            command=lambda fn=field_name: self._copy_field_value(fn)
+        )
+        copy_btn.pack(side="left", padx=(0, 4))
+        self._field_copy_buttons[field_name] = copy_btn
+
         ctk.CTkLabel(frame, text=label, width=200, anchor="w",
-                     font=ctk.CTkFont(size=12), text_color=TEXT_MAIN).pack(side="left", padx=(4, 12))
+                     font=ctk.CTkFont(size=12), text_color=TEXT_MAIN).pack(side="left", padx=(0, 12))
         
         if field_type == 'date':
             entry = ctk.CTkEntry(frame, placeholder_text="ДД.ММ.ГГГГ", width=200, corner_radius=8,
@@ -1167,6 +1178,36 @@ class LicenseCardDialog(ctk.CTkToplevel):
                 pass
 
         self.after(1500, restore)
+
+    def _copy_field_value(self, field_name):
+        """Copy a single field's value to the clipboard."""
+        entry = self.entries.get(field_name)
+        btn = self._field_copy_buttons.get(field_name)
+        if entry is None:
+            return
+        try:
+            if isinstance(entry, ctk.CTkTextbox):
+                text = entry.get("1.0", "end-1c").strip()
+            else:
+                text = entry.get().strip()
+        except Exception:
+            text = ""
+        if not text:
+            return
+        copy_to_clipboard(self, text)
+        # Brief visual feedback on the button
+        if btn is not None:
+            try:
+                btn.configure(text="✓")
+            except Exception:
+                pass
+            def restore(b=btn):
+                try:
+                    if b.winfo_exists():
+                        b.configure(text="📋")
+                except Exception:
+                    pass
+            self.after(1200, restore)
 
     def _on_save(self):
         data = self._collect_data()
