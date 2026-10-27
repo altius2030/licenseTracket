@@ -36,7 +36,7 @@ from models import (
 APP_TITLE = "License Tracker"
 APP_WIDTH = 1400
 APP_HEIGHT = 800
-APP_VERSION = "1.1.14"
+APP_VERSION = "1.1.15"
 GITHUB_REPO = "altius2030/licenseTracket"
 GITHUB_RELEASES_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 DB_PATH = os.path.join(get_app_dir(), "licenses.db")
@@ -2010,7 +2010,21 @@ class LicenseTrackerApp(ctk.CTk):
         ctk.CTkLabel(
             nav, text="🔑 База лицензий",
             font=ctk.CTkFont(size=14, weight="bold"), text_color=TEXT_MAIN
-        ).pack(side="left", padx=(16, 30))
+        ).pack(side="left", padx=(16, 10))
+
+        # File menu button
+        ctk.CTkButton(
+            nav, text="📁  Файл", width=80, height=36, corner_radius=8,
+            fg_color="transparent", hover_color=BG_PANEL_2,
+            text_color=TEXT_MUTED, font=ctk.CTkFont(size=12),
+            command=self._show_file_menu
+        ).pack(side="left", padx=0, pady=14)
+
+        # Category nav items (centered)
+        self.category_frame = ctk.CTkFrame(nav, fg_color="transparent")
+        self.category_frame.pack(side="left", fill="both", expand=True, pady=14)
+        self.category_inner = ctk.CTkFrame(self.category_frame, fg_color="transparent")
+        self.category_inner.place(relx=0.5, rely=0.5, anchor="center")
 
         # Right side: version badge + refresh + theme toggle
         ctk.CTkLabel(
@@ -2042,9 +2056,7 @@ class LicenseTrackerApp(ctk.CTk):
         )
         self.theme_btn.pack(side="right", padx=(0, 6), pady=13)
 
-        # Category nav items (created in _load_categories) - centered in the bar
-        self.category_inner = ctk.CTkFrame(nav, fg_color="transparent")
-        self.category_inner.place(relx=0.5, rely=0.5, anchor="center")
+
         
         # ===== Content container =====
         page = ctk.CTkFrame(self, fg_color="transparent")
@@ -2354,9 +2366,230 @@ class LicenseTrackerApp(ctk.CTk):
         """Schedule cb on the UI thread, ignoring destroyed windows."""
         try:
             if self.winfo_exists():
-                self._post( cb)
+                self.after(0, cb)
         except Exception:
             pass
+
+    # ===== File menu (backup + updates) =====
+
+    def _show_file_menu(self):
+        """Show a popup menu with backup and update options."""
+        menu = tk.Menu(self, tearoff=0, font=("Segoe UI", 11), bg=BG_PANEL,
+                       fg=TEXT_MAIN, activebackground=ACCENT,
+                       activeforeground="#ffffff", borderwidth=0)
+        menu.add_command(label="💾  Резервная копия базы…",
+                         command=lambda: (menu.destroy(), self._backup_database()))
+        menu.add_command(label="📅  Резервная копия по расписанию…",
+                         command=lambda: (menu.destroy(), self._schedule_backup_dialog()))
+        menu.add_separator()
+        menu.add_command(label="⬆  Проверить обновления",
+                         command=lambda: (menu.destroy(), self._check_updates_manual()))
+        try:
+            menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+        except Exception:
+            try:
+                menu.destroy()
+            except Exception:
+                pass
+
+    def _backup_database(self):
+        """Save a copy of the database to a user-chosen location."""
+        initial = f"licenses_backup_{date.today().isoformat()}.db"
+        path = filedialog.asksaveasfilename(
+            title="Сохранить резервную копию базы",
+            initialfile=initial,
+            defaultextension=".db",
+            filetypes=[("SQLite DB", "*.db"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            import shutil
+            src = self.db.db_path
+            # Write-ahead log handling: copy the main file
+            shutil.copy2(src, path)
+            # Also copy WAL/SHM if they exist
+            for ext in ("-wal", "-shm"):
+                wal = src + ext
+                if os.path.exists(wal):
+                    shutil.copy2(wal, path + ext)
+            messagebox.showinfo(
+                "Резервная копия",
+                f"База данных сохранена в:\n{path}",
+                parent=self,
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Ошибка",
+                f"Не удалось создать резервную копию:\n{e}",
+                parent=self,
+            )
+
+    def _schedule_backup_dialog(self):
+        """Set up automatic daily backup at a chosen time."""
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Резервная копия по расписанию")
+        dlg.geometry("420x280")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.configure(fg_color=BG_PANEL)
+        dlg.after(100, dlg.grab_set)
+
+        ctk.CTkLabel(
+            dlg, text="📅  Автоматическое резервное копирование",
+            font=ctk.CTkFont(size=15, weight="bold"), text_color=TEXT_MAIN,
+        ).pack(pady=(20, 12))
+
+        # State: on/off
+        enabled_var = ctk.StringVar(
+            value="on" if self.db.get_setting("backup_schedule_enabled") == "1" else "off"
+        )
+        ctk.CTkCheckBox(
+            dlg, text="Включить ежедневное резервное копирование",
+            variable=enabled_var, onvalue="on", offvalue="off",
+            font=ctk.CTkFont(size=13), text_color=TEXT_MAIN,
+        ).pack(pady=(0, 10))
+
+        # Folder
+        folder_frame = ctk.CTkFrame(dlg, fg_color="transparent")
+        folder_frame.pack(fill="x", padx=20, pady=(0, 8))
+        ctk.CTkLabel(folder_frame, text="Папка:", width=60, anchor="w",
+                     font=ctk.CTkFont(size=12), text_color=TEXT_MUTED).pack(side="left")
+        folder_var = ctk.StringVar(
+            value=self.db.get_setting("backup_schedule_dir") or os.path.join(
+                os.path.expanduser("~"), "Documents", "LicenseTracker_Backups"
+            )
+        )
+        folder_entry = ctk.CTkEntry(folder_frame, textvariable=folder_var, width=240)
+        folder_entry.pack(side="left", fill="x", expand=True, padx=(6, 4))
+        ctk.CTkButton(
+            folder_frame, text="…", width=28, height=28, corner_radius=6,
+            fg_color=BG_PANEL_2, hover_color=BORDER, text_color=TEXT_MAIN,
+            command=lambda: (
+                folder_var.set(filedialog.askdirectory(title="Выберите папку") or folder_var.get())
+            )
+        ).pack(side="left")
+
+        # Time
+        time_frame = ctk.CTkFrame(dlg, fg_color="transparent")
+        time_frame.pack(fill="x", padx=20, pady=(0, 12))
+        ctk.CTkLabel(time_frame, text="Время:", width=60, anchor="w",
+                     font=ctk.CTkFont(size=12), text_color=TEXT_MUTED).pack(side="left")
+        time_var = ctk.StringVar(value=self.db.get_setting("backup_schedule_time") or "02:00")
+        time_entry = ctk.CTkEntry(time_frame, textvariable=time_var, width=80)
+        time_entry.pack(side="left", padx=(6, 0))
+        ctk.CTkLabel(time_frame, text=" (ЧЧ:ММ)", anchor="w",
+                     font=ctk.CTkFont(size=11), text_color=TEXT_MUTED).pack(side="left")
+
+        status_label = ctk.CTkLabel(dlg, text="", anchor="w",
+                                    font=ctk.CTkFont(size=11), text_color=TEXT_MUTED)
+        status_label.pack(fill="x", padx=20)
+
+        def save():
+            try:
+                self.db.set_setting("backup_schedule_enabled", "1" if enabled_var.get() == "on" else "0")
+                self.db.set_setting("backup_schedule_dir", folder_var.get())
+                self.db.set_setting("backup_schedule_time", time_var.get())
+                # Ensure the folder exists
+                os.makedirs(folder_var.get(), exist_ok=True)
+                # Restart the scheduler thread
+                self._start_backup_scheduler()
+                dlg.destroy()
+                messagebox.showinfo("Расписание", "Настройки сохранены.", parent=self)
+            except Exception as e:
+                status_label.configure(text=f"Ошибка: {e}", text_color="#e5484d")
+
+        ctk.CTkButton(
+            dlg, text="Сохранить", width=120, height=36, corner_radius=8,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            font=ctk.CTkFont(size=13, weight="bold"), command=save
+        ).pack(pady=(8, 16))
+
+        self._start_backup_scheduler()
+
+    def _start_backup_scheduler(self):
+        """Start a background thread that performs scheduled backups."""
+        if getattr(self, "_backup_scheduler_thread", None) and self._backup_scheduler_thread.is_alive():
+            return
+
+        def scheduler():
+            while True:
+                try:
+                    if self.db.get_setting("backup_schedule_enabled") == "1":
+                        time_str = self.db.get_setting("backup_schedule_time") or "02:00"
+                        folder = self.db.get_setting("backup_schedule_dir")
+                        now = datetime.now()
+                        target = datetime.strptime(time_str, "%H:%M").replace(
+                            year=now.year, month=now.month, day=now.day
+                        )
+                        # If already passed today, wait until tomorrow
+                        if now >= target:
+                            target += timedelta(days=1)
+                        # Wait until the target time (check every 30s)
+                        while datetime.now() < target:
+                            import time as _time
+                            _time.sleep(30)
+                        # Perform backup
+                        self._run_scheduled_backup(folder)
+                    import time as _time
+                    _time.sleep(60)
+                except Exception:
+                    import time as _time
+                    _time.sleep(60)
+
+        self._backup_scheduler_thread = threading.Thread(target=scheduler, daemon=True)
+        self._backup_scheduler_thread.start()
+
+    def _run_scheduled_backup(self, folder):
+        """Actually copy the DB to the backup folder."""
+        try:
+            os.makedirs(folder, exist_ok=True)
+            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            dest = os.path.join(folder, f"licenses_backup_{ts}.db")
+            import shutil
+            shutil.copy2(self.db.db_path, dest)
+            # Keep only the last 30 backups
+            backups = sorted(
+                f for f in os.listdir(folder) if f.startswith("licenses_backup_") and f.endswith(".db")
+            )
+            for old in backups[:-30]:
+                try:
+                    os.remove(os.path.join(folder, old))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _download_and_install_update(self, download_url, version, release_url):
+        """Download the new exe and replace the current one."""
+        try:
+            # Download to temp
+            tmp_dir = tempfile.gettempdir()
+            new_exe = os.path.join(tmp_dir, "LicenseTracker_update.exe")
+            req = urllib.request.Request(download_url, headers={"User-Agent": f"LicenseTracker/{APP_VERSION}"})
+            with urllib.request.urlopen(req, timeout=120) as resp, open(new_exe, "wb") as f:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+
+            # Create a helper batch to replace and restart
+            current = os.path.join(os.path.dirname(sys.executable), "LicenseTracker.exe")
+            bat = os.path.join(tmp_dir, "lt_update.bat")
+            with open(bat, "w", encoding="utf-8") as f:
+                f.write("@echo off\n")
+                f.write("timeout /t 2 /nobreak >nul\n")
+                f.write(f'copy /Y "{new_exe}" "{current}" >nul\n')
+                f.write(f'start "" "{current}"\n')
+                f.write('del "%~f0"\n')
+
+            subprocess.Popen(["cmd", "/c", bat],
+                             creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS)
+            self.after(0, self.destroy)
+            self.after(100, os._exit, 0)
+        except Exception as e:
+            messagebox.showerror("Обновление", f"Ошибка при установке обновления:\n{e}", parent=self)
 
     def _auto_update_check(self):
         if not getattr(sys, "frozen", False):
@@ -2377,7 +2610,13 @@ class LicenseTrackerApp(ctk.CTk):
             url = find_update_asset_url(release)
             if not url:
                 return
-            self._post( lambda: self._start_update_download(release, tag, url, silent=True))
+            # Auto-install without asking
+            self._update_in_progress = True
+            self._post( lambda: messagebox.showinfo(
+                "Обновление",
+                f"Найдена новая версия {tag}. Приложение будет обновлено и перезапущено.",
+                parent=self))
+            self._download_and_install_update(url, tag, release.get("html_url", ""))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2390,7 +2629,7 @@ class LicenseTrackerApp(ctk.CTk):
                 release = fetch_latest_release()
             except Exception as e:
                 self._post( lambda: messagebox.showerror(
-                    "Обновление", f"Не удалось проверить обновления:\\n{e}", parent=self))
+                    "Обновление", f"Не удалось проверить обновления:\n{e}", parent=self))
                 return
             if not isinstance(release, dict):
                 self._post( lambda: messagebox.showerror(
@@ -2411,10 +2650,11 @@ class LicenseTrackerApp(ctk.CTk):
             def ask():
                 if messagebox.askyesno(
                     "Обновление",
-                    f"Доступна новая версия {tag}.\\nЗагрузить и установить?",
+                    f"Доступна новая версия {tag}.\nЗагрузить и установить?",
                     parent=self,
                 ):
-                    self._start_update_download(release, tag, url, silent=False)
+                    self._update_in_progress = True
+                    self._download_and_install_update(url, tag, release.get("html_url", ""))
 
             self._post( ask)
 
