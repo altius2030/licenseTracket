@@ -36,7 +36,7 @@ from models import (
 APP_TITLE = "License Tracker"
 APP_WIDTH = 1400
 APP_HEIGHT = 800
-APP_VERSION = "1.1.17"
+APP_VERSION = "1.1.18"
 GITHUB_REPO = "altius2030/licenseTracket"
 GITHUB_RELEASES_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 DB_PATH = os.path.join(get_app_dir(), "licenses.db")
@@ -358,62 +358,32 @@ def format_card_copy_text(data: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def copy_to_clipboard(widget, text: str) -> bool:
-    """Put text on the clipboard; returns False when there is nothing to copy.
+# Main application window used as the persistent clipboard owner.
+# Tk keeps clipboard data only while its selection owner exists, so using the
+# long-lived main window (instead of a dialog that gets destroyed) makes the
+# copied data survive and avoids Win32/Tk clipboard locking conflicts.
+_CLIPBOARD_ROOT = None
 
-    On Windows we write through the Win32 clipboard API so the data persists
-    even after the owning widget / dialog is destroyed (Tk's clipboard_append
-    keeps the data only while the selection owner exists, which made a second
-    copy from a newly opened card silently fail).
-    """
+
+def copy_to_clipboard(widget, text: str) -> bool:
+    """Put text on the clipboard; returns False when there is nothing to copy."""
     if not text:
         return False
 
-    # Windows: write directly to the OS clipboard (reliable overwrite).
-    try:
-        import ctypes
-        CF_UNICODETEXT = 13
-        GMEM_MOVEABLE = 0x0002
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        user32.OpenClipboard.argtypes = [ctypes.c_void_p]
-        user32.OpenClipboard.restype = ctypes.c_bool
-        user32.EmptyClipboard.restype = ctypes.c_bool
-        user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
-        user32.SetClipboardData.restype = ctypes.c_void_p
-        user32.CloseClipboard.restype = ctypes.c_bool
-        kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
-        kernel32.GlobalAlloc.restype = ctypes.c_void_p
-        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
-        kernel32.GlobalLock.restype = ctypes.c_void_p
-        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
-        kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
-
-        if not user32.OpenClipboard(None):
-            raise RuntimeError("OpenClipboard failed")
+    root = globals().get("_CLIPBOARD_ROOT")
+    if root is not None:
         try:
-            user32.EmptyClipboard()
-            payload = text.encode("utf-16-le") + b"\x00\x00"
-            handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(payload))
-            if not handle:
-                raise RuntimeError("GlobalAlloc failed")
-            locked = kernel32.GlobalLock(handle)
-            if not locked:
-                kernel32.GlobalFree(handle)
-                raise RuntimeError("GlobalLock failed")
-            ctypes.memmove(locked, payload, len(payload))
-            kernel32.GlobalUnlock(handle)
-            if not user32.SetClipboardData(CF_UNICODETEXT, handle):
-                kernel32.GlobalFree(handle)
-                raise RuntimeError("SetClipboardData failed")
-            # ownership of `handle` transfers to the clipboard on success
-        finally:
-            user32.CloseClipboard()
-        return True
-    except Exception:
-        pass
+            root.clipboard_clear()
+            root.clipboard_append(text)
+            try:
+                root.update()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            pass
 
-    # Fallback (non-Windows / ctypes unavailable): Tk-based clipboard.
+    # Fallback: Tk clipboard on the given widget.
     try:
         widget.clipboard_clear()
         widget.clipboard_append(text)
@@ -1220,9 +1190,17 @@ class LicenseCardDialog(ctk.CTkToplevel):
         try:
             if self.is_new:
                 license_id = self.db.create_license(data)
+                self.db.log_activity(
+                    "create",
+                    f"Создана запись «{data.get('full_name', '')}» (ID {license_id})",
+                )
                 self.result = ('create', license_id)
             else:
                 self.db.update_license(self.license_data['id'], data)
+                self.db.log_activity(
+                    "update",
+                    f"Обновлена запись «{data.get('full_name', '')}» (ID {self.license_data['id']})",
+                )
                 self.result = ('update', self.license_data['id'])
             self.destroy()
         except Exception as e:
@@ -1794,6 +1772,27 @@ class ImportDialog(ctk.CTkToplevel):
 
     # ---------- Import ----------
 
+    @staticmethod
+    def _count_file_duplicates(records):
+        """Count records that share gbs_id, phone or email with an earlier row."""
+        seen = set()
+        duplicates = 0
+        for rec in records:
+            keys = []
+            for field in ("gbs_id", "phone", "email"):
+                val = str(rec.get(field) or "").strip().lower()
+                if val:
+                    keys.append((field, val))
+            hit = False
+            for k in keys:
+                if k in seen:
+                    hit = True
+                else:
+                    seen.add(k)
+            if hit:
+                duplicates += 1
+        return duplicates
+
     def _do_import(self):
         if not self.sheets:
             return
@@ -1822,9 +1821,26 @@ class ImportDialog(ctk.CTkToplevel):
             )
             return
 
+        # Warn about duplicates inside the file (by gbs_id / phone / email)
+        dup_count = self._count_file_duplicates(records)
+        if dup_count:
+            if not messagebox.askyesno(
+                "Дубликаты",
+                f"В файле найдено похожих записей: {dup_count}.\n"
+                "Совпадения по GBS ID / телефону / почте могут перезаписать друг друга.\n\n"
+                "Продолжить импорт?",
+                parent=self,
+            ):
+                return
+
         try:
             imported, updated, skipped = self.db.bulk_upsert(records, sheet, category)
             self.db.log_import(self.file_path, sheet, imported, updated, skipped)
+            self.db.log_activity(
+                "import",
+                f"Импорт «{os.path.basename(self.file_path)}» (лист {sheet}) в «{category}»: "
+                f"новых {imported}, обновлено {updated}, пропущено {skipped}",
+            )
         except Exception as e:
             messagebox.showerror("Ошибка импорта", str(e), parent=self)
             return
@@ -1874,6 +1890,8 @@ class LicenseTrackerApp(ctk.CTk):
     
     def __init__(self):
         super().__init__()
+        global _CLIPBOARD_ROOT
+        _CLIPBOARD_ROOT = self
         self.db = Database(DB_PATH)
         self._migrate_otvaly_category()
         try:
@@ -1911,8 +1929,118 @@ class LicenseTrackerApp(ctk.CTk):
         self._bind_shortcuts()
         # Auto-backup to Documents on startup
         self.after(1500, self._auto_backup_to_documents)
+        # Expiry summary (once per day)
+        self.after(1800, self._check_expiry_summary)
         # Background update check on launch (only for frozen builds)
         self.after(2500, self._auto_update_check)
+
+    def _check_expiry_summary(self):
+        """Show a once-a-day summary of expiring / expired licenses (all categories)."""
+        try:
+            last = self.db.get_setting("expiry_summary_date", "")
+            today = date.today().isoformat()
+            if last == today:
+                return
+
+            rows = self.db.get_all_licenses()
+            counts = {"expired": 0, "critical": 0, "expiring": 0}
+            per_cat = {}
+            for lic in rows:
+                days = self._calc_days_left(lic)
+                cat = lic.get("category", "")
+                per_cat.setdefault(cat, {"expired": 0, "critical": 0, "expiring": 0})
+                if days is None:
+                    continue
+                if days < 0:
+                    counts["expired"] += 1
+                    per_cat[cat]["expired"] += 1
+                elif days <= 3:
+                    counts["critical"] += 1
+                    per_cat[cat]["critical"] += 1
+                elif days <= 7:
+                    counts["expiring"] += 1
+                    per_cat[cat]["expiring"] += 1
+
+            self.db.set_setting("expiry_summary_date", today)
+
+            if not (counts["expired"] or counts["critical"] or counts["expiring"]):
+                return
+
+            dlg = ctk.CTkToplevel(self)
+            dlg.title("Напоминание об истечении сроков")
+            dlg.geometry("460x360")
+            dlg.resizable(False, False)
+            dlg.transient(self)
+            dlg.configure(fg_color=BG_PANEL)
+
+            ctk.CTkLabel(
+                dlg, text="⏰  Сроки истечения лицензий",
+                font=ctk.CTkFont(size=15, weight="bold"), text_color=TEXT_MAIN,
+            ).pack(pady=(18, 6))
+
+            chips = ctk.CTkFrame(dlg, fg_color="transparent")
+            chips.pack(pady=(0, 8))
+            for label, key, color in (
+                ("Просрочено", "expired", "#e5484d"),
+                ("≤ 3 дней", "critical", "#f0a020"),
+                ("≤ 7 дней", "expiring", "#3b82f6"),
+            ):
+                box = ctk.CTkFrame(chips, fg_color=BG_PANEL_2, corner_radius=8)
+                box.pack(side="left", padx=6)
+                ctk.CTkLabel(box, text=f"{label}:  ",
+                             font=ctk.CTkFont(size=12), text_color=TEXT_MUTED).pack(side="left", padx=(10, 0), pady=6)
+                ctk.CTkLabel(box, text=str(counts[key]),
+                             font=ctk.CTkFont(size=14, weight="bold"), text_color=color).pack(side="left", padx=(0, 10), pady=6)
+
+            scroll = ctk.CTkScrollableFrame(dlg, fg_color="transparent", width=420, height=150)
+            scroll.pack(fill="both", expand=True, padx=16, pady=(4, 8))
+            for cat in CATEGORIES:
+                if cat not in per_cat:
+                    continue
+                c = per_cat[cat]
+                if not (c["expired"] or c["critical"] or c["expiring"]):
+                    continue
+                row = ctk.CTkFrame(scroll, fg_color="transparent")
+                row.pack(fill="x", pady=2)
+                ctk.CTkLabel(row, text=cat, width=140, anchor="w",
+                             font=ctk.CTkFont(size=12), text_color=TEXT_MAIN).pack(side="left")
+                ctk.CTkLabel(row, text=f"просрочено {c['expired']}",
+                             font=ctk.CTkFont(size=11), text_color="#e5484d").pack(side="left", padx=6)
+                ctk.CTkLabel(row, text=f"≤3 дн {c['critical']}",
+                             font=ctk.CTkFont(size=11), text_color="#f0a020").pack(side="left", padx=6)
+                ctk.CTkLabel(row, text=f"≤7 дн {c['expiring']}",
+                             font=ctk.CTkFont(size=11), text_color="#3b82f6").pack(side="left", padx=6)
+
+            def show(filter_value, kind):
+                dlg.destroy()
+                if kind == "status":
+                    self.status_filter_var.set(filter_value)
+                else:
+                    self.days_filter_var.set(filter_value)
+                self._on_filter_change()
+
+            buttons = ctk.CTkFrame(dlg, fg_color="transparent")
+            buttons.pack(fill="x", padx=16, pady=(0, 14))
+            ctk.CTkButton(
+                buttons, text="Просроченные", width=130, height=34, corner_radius=8,
+                fg_color="#e5484d", hover_color="#c73840", text_color="#ffffff",
+                font=ctk.CTkFont(size=12),
+                command=lambda: show("Истекла", "status"),
+            ).pack(side="left", expand=True, fill="x", padx=(0, 6))
+            ctk.CTkButton(
+                buttons, text="≤ 7 дней", width=110, height=34, corner_radius=8,
+                fg_color=BG_PANEL_2, hover_color=BORDER, text_color=TEXT_MAIN,
+                font=ctk.CTkFont(size=12),
+                command=lambda: show("Неделя (7 дней)", "days"),
+            ).pack(side="left", expand=True, fill="x", padx=(6, 0))
+
+            ctk.CTkButton(
+                dlg, text="Понятно", width=120, height=32, corner_radius=8,
+                fg_color=BG_PANEL_2, hover_color=BORDER, text_color=TEXT_MAIN,
+                font=ctk.CTkFont(size=12), command=dlg.destroy,
+            ).pack(pady=(0, 14))
+        except Exception:
+            pass
     
     def _build_ui(self):
         self.configure(fg_color=BG_APP)
@@ -2317,6 +2445,8 @@ class LicenseTrackerApp(ctk.CTk):
         menu.add_command(label="📅  Резервная копия по расписанию…",
                          command=lambda: (menu.destroy(), self._schedule_backup_dialog()))
         menu.add_separator()
+        menu.add_command(label="📜  Журнал действий",
+                         command=lambda: (menu.destroy(), self._show_activity_log()))
         menu.add_command(label="⬆  Проверить обновления",
                          command=lambda: (menu.destroy(), self._check_updates_manual()))
         try:
@@ -2326,6 +2456,81 @@ class LicenseTrackerApp(ctk.CTk):
                 menu.destroy()
             except Exception:
                 pass
+
+    def _show_activity_log(self):
+        """Show the audit log (create/update/delete/move/renew/import)."""
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Журнал действий")
+        dlg.geometry("720x480")
+        dlg.transient(self)
+        dlg.configure(fg_color=BG_PANEL)
+
+        ctk.CTkLabel(
+            dlg, text="📜  Журнал действий",
+            font=ctk.CTkFont(size=15, weight="bold"), text_color=TEXT_MAIN,
+        ).pack(pady=(16, 8), anchor="w", padx=20)
+
+        filter_frame = ctk.CTkFrame(dlg, fg_color="transparent")
+        filter_frame.pack(fill="x", padx=20, pady=(0, 8))
+        ctk.CTkLabel(filter_frame, text="Действие:", font=ctk.CTkFont(size=12),
+                     text_color=TEXT_MUTED).pack(side="left", padx=(0, 6))
+        self._log_filter_var = ctk.StringVar(value="Все")
+        log_menu = DropdownOption(
+            filter_frame, ["Все", "create", "update", "delete", "move", "renew", "import", "restore"],
+            self._log_filter_var, command=lambda *_: self._load_log_rows(tree),
+            width=160, height=30,
+        )
+        log_menu.pack(side="left")
+        ctk.CTkButton(
+            filter_frame, text="Обновить", width=100, height=30, corner_radius=8,
+            fg_color=BG_PANEL_2, hover_color=BORDER, text_color=TEXT_MAIN,
+            font=ctk.CTkFont(size=12),
+            command=lambda: self._load_log_rows(tree),
+        ).pack(side="left", padx=(8, 0))
+
+        tree_frame = ctk.CTkFrame(dlg, fg_color=BG_PANEL_2, corner_radius=10)
+        tree_frame.pack(fill="both", expand=True, padx=20, pady=(0, 12))
+
+        tree = ttk.Treeview(
+            tree_frame, columns=("id", "action", "details", "created_at"),
+            show="headings", selectmode="browse", style="Modern.Treeview",
+        )
+        tree.heading("id", text="ID")
+        tree.heading("action", text="Действие")
+        tree.heading("details", text="Подробности")
+        tree.heading("created_at", text="Когда")
+        tree.column("id", width=50, minwidth=40)
+        tree.column("action", width=90, minwidth=70)
+        tree.column("details", width=420, minwidth=200)
+        tree.column("created_at", width=150, minwidth=120)
+        tree.pack(fill="both", expand=True, padx=8, pady=8)
+
+        self._load_log_rows(tree)
+
+        ctk.CTkButton(
+            dlg, text="Закрыть", width=110, height=34, corner_radius=8,
+            fg_color=BG_PANEL_2, hover_color=BORDER, text_color=TEXT_MAIN,
+            font=ctk.CTkFont(size=12), command=dlg.destroy,
+        ).pack(pady=(0, 14))
+
+    def _load_log_rows(self, tree):
+        try:
+            rows = self.db.get_activity_log(300)
+        except Exception:
+            rows = []
+        flt = getattr(self, "_log_filter_var", None)
+        want = flt.get() if flt else "Все"
+        for item in tree.get_children():
+            tree.delete(item)
+        for r in rows:
+            if want != "Все" and r.get("action") != want:
+                continue
+            tree.insert("", "end", values=(
+                r.get("id"),
+                r.get("action"),
+                r.get("details") or "",
+                r.get("created_at") or "",
+            ))
 
     def _show_columns_dialog(self):
         """Show a dialog with checkboxes to toggle column visibility."""
@@ -2561,6 +2766,28 @@ class LicenseTrackerApp(ctk.CTk):
                 f for f in os.listdir(folder) if f.startswith("licenses_backup_") and f.endswith(".db")
             )
             for old in backups[:-30]:
+                try:
+                    os.remove(os.path.join(folder, old))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _pre_op_backup(self):
+        """Create a timestamped backup right before a dangerous operation."""
+        try:
+            docs = os.path.join(os.path.expanduser("~"), "Documents")
+            folder = os.path.join(docs, "LicenseTracker_Backups")
+            os.makedirs(folder, exist_ok=True)
+            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            dest = os.path.join(folder, f"before_operation_{ts}.db")
+            import shutil
+            shutil.copy2(self.db.db_path, dest)
+            backups = sorted(
+                f for f in os.listdir(folder)
+                if f.startswith("before_operation_") and f.endswith(".db")
+            )
+            for old in backups[:-20]:
                 try:
                     os.remove(os.path.join(folder, old))
                 except Exception:
@@ -3273,8 +3500,13 @@ class LicenseTrackerApp(ctk.CTk):
             return
 
         def do_move(category):
+            self._pre_op_backup()
             moved = self.db.move_licenses(ids, category)
             if moved:
+                self.db.log_activity(
+                    "move",
+                    f"Перемещено записей: {moved} в категорию «{category}»",
+                )
                 self._load_categories()
                 self._load_sheets()
                 self._refresh_data()
@@ -3294,6 +3526,18 @@ class LicenseTrackerApp(ctk.CTk):
         if not messagebox.askyesno("Подтверждение", msg):
             return
 
+        self._pre_op_backup()
+
+        # Snapshot records + comments so the deletion can be undone
+        snapshot = []
+        for item_id in selection:
+            try:
+                lic = self.db.get_license(int(item_id))
+            except (TypeError, ValueError):
+                lic = None
+            if lic:
+                snapshot.append({'license': lic, 'comments': self.db.get_comments(lic['id'])})
+
         deleted = 0
         for item_id in selection:
             try:
@@ -3302,9 +3546,66 @@ class LicenseTrackerApp(ctk.CTk):
             except Exception:
                 pass
         if deleted:
+            self.db.log_activity(
+                "delete",
+                f"Удалено записей: {deleted} (ID: {', '.join(str(i) for i in selection)})",
+            )
             self._refresh_data()
             self._load_sheets()
             self._load_categories()
+            if snapshot:
+                self._show_undo_toast(
+                    f"Удалено записей: {deleted}",
+                    lambda: self._undo_delete(snapshot),
+                )
+
+    def _undo_delete(self, snapshot):
+        try:
+            restored = self.db.restore_licenses(snapshot)
+        except Exception:
+            restored = 0
+        if restored:
+            self.db.log_activity("restore", f"Восстановлено записей: {restored}")
+            self._refresh_data()
+            self._load_sheets()
+            self._load_categories()
+            messagebox.showinfo("Восстановление", f"Восстановлено записей: {restored}", parent=self)
+
+    def _show_undo_toast(self, text, on_undo):
+        """Small auto-closing toast with an 'Отменить' action."""
+        toast = ctk.CTkToplevel(self)
+        toast.overrideredirect(True)
+        toast.configure(fg_color=BG_PANEL)
+        try:
+            toast.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        frame = ctk.CTkFrame(toast, fg_color=BG_PANEL, corner_radius=10,
+                             border_width=1, border_color=BORDER)
+        frame.pack(fill="both", expand=True, padx=2, pady=2)
+
+        ctk.CTkLabel(frame, text=text, font=ctk.CTkFont(size=12),
+                     text_color=TEXT_MAIN).pack(side="left", padx=(12, 6), pady=8)
+
+        ctk.CTkButton(
+            frame, text="Отменить", width=90, height=30, corner_radius=8,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            font=ctk.CTkFont(size=12),
+            command=lambda: (toast.destroy(), on_undo()),
+        ).pack(side="left", padx=(0, 6), pady=8)
+
+        ctk.CTkButton(
+            frame, text="✕", width=30, height=30, corner_radius=8,
+            fg_color=BG_PANEL_2, hover_color=BORDER, text_color=TEXT_MAIN,
+            font=ctk.CTkFont(size=12), command=toast.destroy,
+        ).pack(side="left", padx=(0, 8), pady=8)
+
+        toast.update_idletasks()
+        x = max(toast.winfo_screenwidth() - toast.winfo_width() - 24, 0)
+        y = max(toast.winfo_screenheight() - toast.winfo_height() - 70, 0)
+        toast.geometry(f"+{x}+{y}")
+        toast.after(10000, lambda: toast.destroy() if toast.winfo_exists() else None)
 
     # ===== Renewal (Продление срока ID) =====
 
@@ -3473,6 +3774,11 @@ class LicenseTrackerApp(ctk.CTk):
             messagebox.showerror("Продление", f"Не удалось продлить: {e}", parent=self)
             return
 
+        if updated:
+            self.db.log_activity(
+                "renew",
+                f"Продлено записей: {updated}. Период: {self._renew_period_text(months, days)}",
+            )
         if dlg is not None:
             dlg.destroy()
         self._refresh_data()
@@ -3525,6 +3831,7 @@ class LicenseTrackerApp(ctk.CTk):
     
     def _on_import(self):
         """Open the import wizard (preview + column mapping + category)."""
+        self._pre_op_backup()
         ImportDialog(
             self, self.db,
             default_category=self.current_category,

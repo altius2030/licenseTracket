@@ -122,6 +122,16 @@ class Database:
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_comments_license ON comments(license_id)")
 
+            # Activity log (audit trail)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS activity_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action TEXT NOT NULL,
+                    details TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             conn.commit()
 
     # ===== CRUD Operations =====
@@ -253,6 +263,35 @@ class Database:
             )
             conn.commit()
             return cursor.rowcount
+
+    def restore_licenses(self, records: List[Dict]) -> int:
+        """Restore previously deleted records (and their comments) by id."""
+        restored = 0
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            for rec in records:
+                lic = dict(rec.get('license') or {})
+                comments = rec.get('comments') or []
+                if not lic:
+                    continue
+                fields = ', '.join(lic.keys())
+                placeholders = ', '.join(['?' for _ in lic])
+                try:
+                    cursor.execute(
+                        f"INSERT OR REPLACE INTO licenses ({fields}) VALUES ({placeholders})",
+                        list(lic.values())
+                    )
+                    for c in comments:
+                        cursor.execute(
+                            "INSERT INTO comments (license_id, text, created_at, updated_at) "
+                            "VALUES (?, ?, ?, ?)",
+                            (lic.get('id'), c.get('text'), c.get('created_at'), c.get('updated_at')),
+                        )
+                    restored += 1
+                except Exception:
+                    pass
+            conn.commit()
+        return restored
 
     # ===== Comments =====
 
@@ -469,6 +508,30 @@ class Database:
                 (key, json.dumps(value))
             )
             conn.commit()
+
+    # ===== Activity log =====
+
+    def log_activity(self, action: str, details: str = ""):
+        """Record an auditable action (create/update/delete/move/renew/import)."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO activity_log (action, details) VALUES (?, ?)",
+                    (action, details),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+    def get_activity_log(self, limit: int = 200) -> List[Dict]:
+        """Return the most recent activity entries, newest first."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM activity_log ORDER BY id DESC LIMIT ?", (int(limit),)
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
     # ===== Import History =====
 
